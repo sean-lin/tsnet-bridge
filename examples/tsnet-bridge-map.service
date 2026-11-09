@@ -1,0 +1,17 @@
+[Unit]
+Description=tsnet-bridge map (tailnet service to local port)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/tsnet-bridge/env
+ExecStart=%h/bin/tsnet-bridge \
+  --hostname local-map \
+  --state-dir %h/.local/state/tsnet-bridge/local-map \
+  --map 127.0.0.1:2222=100.64.0.21:22
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,17 @@
+[Unit]
+Description=tsnet-bridge publish (local service to tailnet)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/tsnet-bridge/env
+ExecStart=%h/bin/tsnet-bridge \
+  --hostname home-ssh \
+  --state-dir %h/.local/state/tsnet-bridge/home-ssh \
+  --publish 9000=127.0.0.1:22
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

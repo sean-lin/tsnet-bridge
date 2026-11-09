@@ -1,0 +1,9 @@
+dist/
+*-state/
+*.log
+
+# local secrets and runtime state
+.env
+*.env
+!*.env.example
+tsnet-bridge-state/
