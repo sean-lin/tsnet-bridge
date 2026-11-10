@@ -7,6 +7,7 @@ Wants=network-online.target
 Type=simple
 EnvironmentFile=%h/.config/tsnet-bridge/env
 ExecStart=%h/bin/tsnet-bridge \
+  --control-url https://headscale.example.com \
   --hostname local-map \
   --state-dir %h/.local/state/tsnet-bridge/local-map \
   --map 127.0.0.1:2222=100.64.0.21:22
