@@ -14,6 +14,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -21,13 +22,33 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"tailscale.com/tsnet"
 )
+
+// version is overridden at build time:
+//
+//	go build -ldflags "-X main.version=$(git describe --tags --always --dirty)"
+var version = "dev"
+
+// verbose gates per-connection logging. Start/stop lines and errors are always
+// logged: a GUI session through the bridge can produce thousands of connection
+// pairs, which would otherwise bury the lines that matter.
+var verbose bool
+
+// vlogf logs only when -verbose is set.
+func vlogf(format string, args ...any) {
+	if verbose {
+		log.Printf(format, args...)
+	}
+}
 
 type multiFlag []string
 
@@ -90,12 +111,32 @@ func parseMap(raw string) (mapSpec, error) {
 	return mapSpec{local: left, target: right}, nil
 }
 
-// copyBoth copies in both directions and returns when either side finishes.
+// closeWriter is the half-close capability both *net.TCPConn and tsnet's own
+// TCP conn implement: it flushes what has been written and sends FIN without
+// tearing down the other direction.
+type closeWriter interface {
+	CloseWrite() error
+}
+
+// copyBoth copies in both directions and returns once both directions finish.
+//
+// The first EOF half-closes the opposite side instead of closing the whole
+// pair: a client that is done sending must still receive the rest of the
+// response (HTTP keep-alive, SSE, WebSocket), which an unconditional close
+// would truncate.
 func copyBoth(a, b net.Conn) {
-	done := make(chan struct{}, 2)
-	go func() { _, _ = io.Copy(a, b); done <- struct{}{} }()
-	go func() { _, _ = io.Copy(b, a); done <- struct{}{} }()
-	<-done
+	var wg sync.WaitGroup
+	wg.Add(2)
+	copyOneWay := func(dst, src net.Conn) {
+		defer wg.Done()
+		_, _ = io.Copy(dst, src)
+		if cw, ok := dst.(closeWriter); ok {
+			_ = cw.CloseWrite()
+		}
+	}
+	go copyOneWay(a, b)
+	go copyOneWay(b, a)
+	wg.Wait()
 }
 
 func servePublish(ctx context.Context, srv *tsnet.Server, spec publishSpec, dialTimeout time.Duration) error {
@@ -124,14 +165,35 @@ func servePublish(ctx context.Context, srv *tsnet.Server, spec publishSpec, dial
 				return
 			}
 			defer d.Close()
-			log.Printf("publish %s -> %s", c.RemoteAddr(), spec.target)
+			vlogf("publish %s -> %s", c.RemoteAddr(), spec.target)
 			copyBoth(c, d)
 		}(c)
 	}
 }
 
+// listenReuseAddr listens on the local address with SO_REUSEADDR set explicitly.
+//
+// Go's own listener already sets it on unix, but only inside the standard
+// library's socket setup, which a caller cannot see or rely on across platforms.
+// Setting it here makes the intent explicit: a bridge that is restarted while
+// previous connections sit in TIME_WAIT must be able to bind again immediately.
+func listenReuseAddr(ctx context.Context, addr string) (net.Listener, error) {
+	lc := net.ListenConfig{
+		Control: func(_, _ string, c syscall.RawConn) error {
+			var sockErr error
+			if err := c.Control(func(fd uintptr) {
+				sockErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
+			}); err != nil {
+				return err
+			}
+			return sockErr
+		},
+	}
+	return lc.Listen(ctx, "tcp", addr)
+}
+
 func serveMap(ctx context.Context, srv *tsnet.Server, spec mapSpec, dialTimeout time.Duration) error {
-	ln, err := net.Listen("tcp", spec.local)
+	ln, err := listenReuseAddr(ctx, spec.local)
 	if err != nil {
 		return fmt.Errorf("listen local %s: %w", spec.local, err)
 	}
@@ -158,9 +220,65 @@ func serveMap(ctx context.Context, srv *tsnet.Server, spec mapSpec, dialTimeout 
 				return
 			}
 			defer d.Close()
-			log.Printf("map %s -> %s", c.RemoteAddr(), spec.target)
+			vlogf("map %s -> %s", c.RemoteAddr(), spec.target)
 			copyBoth(c, d)
 		}(c)
+	}
+}
+
+// stateHasNode reports whether dir already holds a tsnet node identity. When
+// it does, a restart resumes that identity and needs no auth key.
+func stateHasNode(dir string) bool {
+	st, err := os.Stat(filepath.Join(dir, "tailscaled.state"))
+	return err == nil && st.Mode().IsRegular() && st.Size() > 0
+}
+
+// lockStateDir takes an exclusive flock on <dir>/lock so two processes can
+// never share one tsnet identity. tsnet keeps its node key and profile in the
+// state directory and rewrites them in place; two writers corrupt that state,
+// and the failure surfaces much later as a node that cannot register. The lock
+// is released by the returned function or, on any exit path, by the kernel
+// closing the descriptor.
+func lockStateDir(dir string) (func(), error) {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("state dir %s: %w", dir, err)
+	}
+	path := filepath.Join(dir, "lock")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("state dir %s: %w", dir, err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, fmt.Errorf("state dir %s is in use by another tsnet-bridge instance (remove %s if that is wrong)", dir, path)
+		}
+		return nil, fmt.Errorf("state dir %s: flock: %w", dir, err)
+	}
+	// Record the owner for humans; the lock itself is what excludes others.
+	_ = f.Truncate(0)
+	_, _ = fmt.Fprintf(f, "%d\n", os.Getpid())
+	return func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+	}, nil
+}
+
+// shutdown closes the tsnet node but never blocks past grace. Close tears down
+// the WireGuard device, the DERP connections and the IPN backend; any of those
+// can stall on network teardown, and a shutdown that hangs is indistinguishable
+// from a crash to init systems and supervisors.
+func shutdown(closeSrv func(), grace time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		closeSrv()
+		close(done)
+	}()
+	select {
+	case <-done:
+		log.Printf("closed cleanly")
+	case <-time.After(grace):
+		log.Printf("close did not finish within %s; exiting anyway", grace)
 	}
 }
 
@@ -172,14 +290,23 @@ func main() {
 		stateDir   = flag.String("state-dir", "./tsnet-bridge-state", "tsnet state directory (unique per node)")
 		derpOnly   = flag.Bool("derp-only", false, "force all peer traffic through the DERP relay (VPS)")
 		dialTO     = flag.Duration("dial-timeout", 10*time.Second, "timeout for outgoing dials")
+		grace      = flag.Duration("shutdown-grace", 5*time.Second, "how long to wait for the tsnet node to close before exiting anyway")
+		verboseFlg = flag.Bool("verbose", false, "log every proxied connection (default: only start/stop and errors)")
+		showVer    = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Var(&publishes, "publish", "publish TAILNET_PORT=LOCAL_HOST:PORT (repeatable)")
 	flag.Var(&maps, "map", "map LOCAL_ADDR=TAILNET_HOST:PORT (repeatable)")
 	flag.Parse()
 
+	if *showVer {
+		fmt.Printf("tsnet-bridge %s (%s %s/%s)\n", version, runtime.Version(), runtime.GOOS, runtime.GOARCH)
+		return
+	}
+	verbose = *verboseFlg
+
 	authKey := strings.TrimSpace(os.Getenv("TS_AUTHKEY"))
-	if authKey == "" {
-		log.Fatal("TS_AUTHKEY is required")
+	if authKey == "" && !stateHasNode(*stateDir) {
+		log.Fatalf("TS_AUTHKEY is required for the first registration (%s holds no node state)", *stateDir)
 	}
 	if len(publishes) == 0 && len(maps) == 0 {
 		log.Fatal("nothing to do: pass at least one --publish or --map")
@@ -199,8 +326,32 @@ func main() {
 		}
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	// Taken after the derp-only re-exec: Go opens files with O_CLOEXEC, so a
+	// lock acquired before exec would be dropped by the exec itself.
+	releaseState, err := lockStateDir(*stateDir)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+	defer releaseState()
+
+	log.Printf("tsnet-bridge %s starting (hostname=%s, derp-only=%t)", version, *hostname, *derpOnly)
+
+	// Two-stage shutdown: the first SIGINT/SIGTERM drains, the second exits at
+	// once. signal.NotifyContext is not enough here because it keeps consuming
+	// further signals, so an operator who has already waited out a slow drain
+	// has no way to force the process down.
+	sigCh := make(chan os.Signal, 2)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-sigCh
+		log.Printf("signal received; shutting down (send it again to exit immediately)")
+		cancel()
+		<-sigCh
+		log.Printf("second signal; exiting immediately")
+		os.Exit(1)
+	}()
 
 	srv := &tsnet.Server{
 		Hostname:   *hostname,
@@ -209,7 +360,13 @@ func main() {
 		Dir:        *stateDir,
 		Logf:       log.Printf,
 	}
-	defer srv.Close()
+	// Close exactly once: the normal path closes with a deadline below, while
+	// early returns still need the defer.
+	var closeOnce sync.Once
+	closeSrv := func() {
+		closeOnce.Do(func() { _ = srv.Close() })
+	}
+	defer closeSrv()
 
 	status, err := srv.Up(ctx)
 	if err != nil {
@@ -241,4 +398,6 @@ func main() {
 			log.Printf("listener stopped: %v", err)
 		}
 	}
+
+	shutdown(closeSrv, *grace)
 }

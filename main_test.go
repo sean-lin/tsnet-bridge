@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestParsePublish(t *testing.T) {
 	tests := []struct {
@@ -64,5 +68,25 @@ func TestParseMap(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("parseMap(%q) = %+v, want %+v", tt.raw, got, tt.want)
 		}
+	}
+}
+
+func TestStateHasNode(t *testing.T) {
+	dir := t.TempDir()
+	if stateHasNode(dir) {
+		t.Fatal("empty dir must not report node state")
+	}
+	// 空的 state 文件不算已注册，避免半截写盘被当成可恢复身份
+	if err := os.WriteFile(filepath.Join(dir, "tailscaled.state"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if stateHasNode(dir) {
+		t.Fatal("zero-length state file must not report node state")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "tailscaled.state"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !stateHasNode(dir) {
+		t.Fatal("non-empty state file must report node state")
 	}
 }

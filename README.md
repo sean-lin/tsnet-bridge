@@ -49,6 +49,26 @@ export TS_AUTHKEY='hskey-auth-...'
 key 只在第一次注册时使用，之后节点状态保存在 `--state-dir` 里。state 目录要
 按节点分开，不能两个进程共用。
 
+## 参数
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--hostname` | `tsnet-bridge` | 节点在 Headscale 里显示的名字 |
+| `--control-url` | `https://blackhole.netsnail.net` | Headscale 控制面地址 |
+| `--state-dir` | `./tsnet-bridge-state` | 节点身份目录，**每个节点独立**；进程独占加锁（`<dir>/lock`） |
+| `--publish` | 无 | `TAILNET_PORT=LOCAL_HOST:PORT`，可重复 |
+| `--map` | 无 | `LOCAL_ADDR=TAILNET_HOST:PORT`，可重复；本地监听显式设 `SO_REUSEADDR` |
+| `--derp-only` | false | 强制全部流量走 DERP 中继（通过 `TS_DEBUG_ALWAYS_USE_DERP` 自我 re-exec 实现） |
+| `--dial-timeout` | `10s` | 出站连接超时 |
+| `--shutdown-grace` | `5s` | 关停时等 tsnet 收尾的上限，超时直接退出 |
+| `--verbose` | false | 逐条打印每条被代理的连接；默认只记起停与错误 |
+| `--version` | | 打印版本（构建时用 `-X main.version=...` 注入） |
+
+退出信号：第一个 `SIGINT`/`SIGTERM` 排空退出，第二个直接退出。
+
+`state-dir` 里的节点身份可跨重启复用，因此 `TS_AUTHKEY` **只在首次注册时必需**；
+已有 state 时可直接启动。
+
 ## 用法
 
 ### 把本机 SSH 发布到 tailnet
