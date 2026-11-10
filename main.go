@@ -286,7 +286,7 @@ func main() {
 	var publishes, maps multiFlag
 	var (
 		hostname   = flag.String("hostname", "tsnet-bridge", "node name shown in Headscale")
-		controlURL = flag.String("control-url", "https://blackhole.netsnail.net", "Headscale control URL")
+		controlURL = flag.String("control-url", "", "Headscale control URL, required (e.g. https://headscale.example.com)")
 		stateDir   = flag.String("state-dir", "./tsnet-bridge-state", "tsnet state directory (unique per node)")
 		derpOnly   = flag.Bool("derp-only", false, "force all peer traffic through the DERP relay (VPS)")
 		dialTO     = flag.Duration("dial-timeout", 10*time.Second, "timeout for outgoing dials")
@@ -303,6 +303,14 @@ func main() {
 		return
 	}
 	verbose = *verboseFlg
+
+	// No default: the control plane is deployment-specific, and a default here
+	// would silently point a fresh install at somebody else's Headscale.
+	control := strings.TrimRight(strings.TrimSpace(*controlURL), "/")
+	if control == "" {
+		log.Fatal("--control-url is required, for example: --control-url https://headscale.example.com")
+	}
+	*controlURL = control
 
 	authKey := strings.TrimSpace(os.Getenv("TS_AUTHKEY"))
 	if authKey == "" && !stateHasNode(*stateDir) {

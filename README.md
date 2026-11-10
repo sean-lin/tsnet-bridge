@@ -23,7 +23,7 @@ tailnet，支持两个方向：
 需要 Go 1.27.3（`tailscale.com v1.104.5` 的依赖要求）。
 
 ```bash
-cd pi/tsnet-bridge
+cd tsnet-bridge
 go build -trimpath -ldflags="-s -w" -o dist/tsnet-bridge-linux-amd64 .
 ```
 
@@ -54,7 +54,7 @@ key 只在第一次注册时使用，之后节点状态保存在 `--state-dir` �
 | 参数 | 默认值 | 说明 |
 |---|---|---|
 | `--hostname` | `tsnet-bridge` | 节点在 Headscale 里显示的名字 |
-| `--control-url` | `https://blackhole.netsnail.net` | Headscale 控制面地址 |
+| `--control-url` | **必填** | Headscale 控制面地址，无默认值（如 `https://headscale.example.com`） |
 | `--state-dir` | `./tsnet-bridge-state` | 节点身份目录，**每个节点独立**；进程独占加锁（`<dir>/lock`） |
 | `--publish` | 无 | `TAILNET_PORT=LOCAL_HOST:PORT`，可重复 |
 | `--map` | 无 | `LOCAL_ADDR=TAILNET_HOST:PORT`，可重复；本地监听显式设 `SO_REUSEADDR` |
@@ -75,6 +75,7 @@ key 只在第一次注册时使用，之后节点状态保存在 `--state-dir` �
 
 ```bash
 tsnet-bridge \
+  --control-url https://headscale.example.com \
   --hostname home-ssh \
   --state-dir /var/lib/tsnet-bridge/home-ssh \
   --publish 9000=127.0.0.1:22
@@ -86,6 +87,7 @@ tailnet 里的设备访问 `100.64.0.x:9000`，流量转到本机 `127.0.0.1:22`
 
 ```bash
 tsnet-bridge \
+  --control-url https://headscale.example.com \
   --hostname local-map \
   --state-dir /var/lib/tsnet-bridge/local-map \
   --map 127.0.0.1:2222=100.64.0.21:22
@@ -97,6 +99,7 @@ tsnet-bridge \
 
 ```bash
 tsnet-bridge \
+  --control-url https://headscale.example.com \
   --hostname bridge \
   --state-dir /var/lib/tsnet-bridge/bridge \
   --publish 9000=127.0.0.1:22 \
@@ -136,9 +139,6 @@ systemctl --user enable --now tsnet-bridge-publish
 
 ## 已知问题
 
-- **subnet router 客户端**：Pi 广播了 `192.168.123.0/24`，它作为客户端访问
-  tsnet 节点时 TCP 建连会失败（ping 正常）。手机/普通节点没有问题。
-  如果目标客户端是 subnet router，请先用普通节点验证。
 - **MagicDNS**：建议直接用 `100.64.0.x`，不依赖 MagicDNS。
 - **Headscale 证书**：本项目不依赖 Tailscale Serve 的 HTTPS 证书，因此不受
   Headscale 不签发 `*.ts.net` 证书的影响。

@@ -63,7 +63,7 @@ map 模式
 | 参数 | 说明 |
 |---|---|
 | `--hostname` | Headscale 里显示的节点名 |
-| `--control-url` | Headscale URL，默认 `https://blackhole.netsnail.net` |
+| `--control-url` | Headscale URL，**必填**，无默认值 |
 | `--state-dir` | tsnet 状态目录，必须每个节点唯一 |
 | `--publish PORT=TARGET` | 可重复；tailnet 端口 → 本机目标 |
 | `--map LOCAL=TAILNET` | 可重复；本机监听地址 → tailnet 目标 |
@@ -97,8 +97,6 @@ map 模式
 - 只支持 TCP；
 - 不支持 UDP、TLS 终止、PROXY protocol；
 - `--map` 需要一个进程级 tsnet 节点，不是“完全不出现在 tailnet”的方案；
-- 如果客户端本身是 subnet router（例如 Pi 广播了 `192.168.123.0/24`），
-  它到 tsnet 节点的 TCP 可能失败；这是 tsnet/客户端侧的问题，不是本工具；
 - `--derp-only` 依赖 tailscale 的调试环境变量，未来版本可能变化，需锁版本。
 
 ## 后续可做
